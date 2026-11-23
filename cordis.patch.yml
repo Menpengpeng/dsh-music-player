@@ -1,0 +1,10 @@
+# dsh-music-player bundle patch
+#
+# 这是插件的挂载声明：DSH 启动时按 bundle 层栈叠加各插件 patch，
+# 本文件把音乐播放器插入 Web profile 的配置树。
+#
+# 安装方式（无需手工改 profile 文件）：
+#   dsh plugin --profile <name> add link:<本目录绝对路径>
+- insert:
+    - id: music-player
+      name: 'dsh-music-player'
