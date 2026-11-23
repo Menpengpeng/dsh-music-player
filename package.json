@@ -1,7 +1,7 @@
 {
   "name": "dsh-music-player",
-  "version": "0.1.0",
-  "description": "在侧边栏底部常驻迷你播放器，搜索并播放上游音乐站的歌曲（无损优先）。",
+  "version": "0.1.1",
+  "description": "在侧边栏底部常驻迷你播放器：搜索、发现广场、播放队列，音质可切并带卡顿自愈。",
   "keywords": [
     "dsh",
     "dsh-plugin",
