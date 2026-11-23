@@ -72,6 +72,28 @@ export function apply(ctx) {
   /** @type {BrowserLogin | null} 当前进行中的浏览器登录会话 */
   let browserLogin = null;
 
+  /**
+   * 音质偏好。
+   *
+   * 默认「balanced」：不追无损，优先能连续播。
+   * 原因是上游站点对单连接限速（实测约 1.3~1.7 Mbps），
+   * 而无损 FLAC 常在 900~1100 kbps，几乎吃满带宽；
+   * 网络稍有抖动，浏览器缓冲就耗尽，表现为「卡一下再继续」。
+   * 320k 只需约 320 kbps，有 4 倍余量，实际听感几乎无差。
+   *
+   * 'lossless' 才强制选最高档；'auto' 由后端按码率阈值筛选。
+   */
+  let qualityMode = 'balanced';
+
+  const QUALITY_MODES = {
+    // 只允许估算码率 <= 384 kbps 的档位（即 320k 及以下）
+    balanced: { maxBitrate: 384, maxRank: 2 },
+    // 只允许无损及以上
+    lossless: { maxBitrate: Infinity, maxRank: 0 },
+    // 完全不限制，选站点给的最高档
+    highest: { maxBitrate: Infinity, maxRank: Infinity },
+  };
+
   const authPayload = (auth) => ({
     authenticated: Boolean(auth?.authenticated),
     user: auth?.user || null,
@@ -100,6 +122,8 @@ export function apply(ctx) {
         /** 前端据此决定要不要显示「浏览器登录」按钮，并提示用的是哪个浏览器 */
         browserLoginSupported: browserLoginInfo().supported,
         browser: browserLoginInfo(),
+        /** 当前音质偏好，前端用它回显选中的档位 */
+        qualityMode,
       };
     },
     async login(body) {
@@ -217,12 +241,30 @@ export function apply(ctx) {
     async resolve(body) {
       await site.ensureReady();
       const track = body.track || {};
-      // 搜索结果不带音质，走 parse → resolve 的完整链路
-      const data = await site.resolveTrack(track, body.quality);
+      // 搜索结果不带音质，走 parse → resolve 的完整链路。
+      // 音质策略，优先级从高到低：
+      //   1) 前端指定了具体音质标识 -> 只用那一档；
+      //   2) lowQuality（卡顿自愈）-> 强制选低码率档，别再给无损；
+      //   3) 否则按当前偏好模式过滤档位。
+      const limits = body.lowQuality
+        ? { maxBitrate: 200, maxRank: 3 }
+        : QUALITY_MODES[qualityMode] || QUALITY_MODES.balanced;
+      const data = await site.resolveTrack(track, body.quality, limits);
       const url = String(data?.url || '');
       if (!url) throw Object.assign(new Error('没有可用的播放地址'), { code: 'upstream-error' });
       // 不把原始地址交给前端，改发本地转发地址：既避开 Referer 校验，也避免暴露上游域
-      return { src: `${AUDIO_ROUTE}?k=${rememberAudio(url)}`, format: data?.format || '', quality: data?.quality || '' };
+      return {
+        src: `${AUDIO_ROUTE}?k=${rememberAudio(url)}`,
+        format: data?.format || '',
+        quality: data?.quality || '',
+      };
+    },
+    /** 读/写音质偏好。 */
+    async quality(body) {
+      if (typeof body.mode === 'string') {
+        if (body.mode in QUALITY_MODES) qualityMode = body.mode;
+      }
+      return { mode: qualityMode, modes: Object.keys(QUALITY_MODES) };
     },
   };
 

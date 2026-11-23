@@ -48,6 +48,27 @@
       { id: 'kugou', label: '酷狗' },
     ];
 
+    /**
+     * 卡顿判定的等待时长。
+     * 上游单连接限速，无损档常常贴着播放所需带宽跑，网络一抖就断流。
+     * 4 秒足够区分「短暂抖动会自己恢复」与「真的供不上」，
+     * 短了会误降档，长了用户已经听出明显停顿。
+     */
+    const STALL_TIMEOUT_MS = 4000;
+
+    /**
+     * 音质档位：balanced 优先流畅，lossless 优先无损，highest 取站点最高。
+     * 默认 balanced —— 上游单连接限速，无损 FLAC 几乎贴着播放所需带宽，
+     * 一有波动就断流；320k 有 4 倍余量，听感几乎无差。
+     */
+    const QUALITY_MODES_LIST = ['balanced', 'lossless', 'highest'];
+    const QUALITY_LABELS = {
+      balanced: '流畅优先（320k）',
+      lossless: '无损优先（FLAC）',
+      highest: '站点最高档',
+    };
+    const QUALITY_SHORT = { balanced: '320k', lossless: 'FLAC', highest: 'MAX' };
+
     // ===== 样式 =====
     // 只用 --dsw-alias-* 主题令牌，跟随宿主明暗切换；类名统一 mp- 前缀避免污染宿主。
     const STYLE_ID = 'mp-styles';
@@ -108,8 +129,12 @@
 .mp-progress { display: flex; align-items: center; gap: 8px; padding: 0 12px 10px; }
 .mp-progress input[type="range"] { flex: 1; min-width: 0; accent-color: var(--dsw-alias-state-business-primary, #fa2d48); }
 .mp-time { font-size: 11px; color: var(--dsw-alias-label-secondary, #6b7280); font-variant-numeric: tabular-nums; flex: none; }
+/* 音质档位：文字按钮，比图标更能说清当前档位 */
+.mp-quality-btn { width: auto !important; padding: 0 5px !important; min-width: 30px; font-size: 10px; font-weight: 600; letter-spacing: .2px; }
+.mp-quality-text { line-height: 1; }
 .mp-hint { padding: 18px 14px; text-align: center; color: var(--dsw-alias-label-secondary, #6b7280); font-size: 12px; line-height: 1.7; }
 .mp-error { color: #e11d48; font-size: 12px; padding: 6px 10px; line-height: 1.6; }
+.mp-note { font-size: 11px; color: var(--dsw-alias-label-secondary, #6b7280); padding: 0 12px 8px; line-height: 1.5; }
 .mp-tabs { display: flex; gap: 4px; padding: 8px 8px 0; }
 .mp-tab {
   flex: 1; height: 26px; border-radius: 7px; border: none; cursor: pointer; font-size: 12px;
@@ -266,8 +291,17 @@
       const [volume, setVolume] = useState(1);
       const [resolving, setResolving] = useState(false);
 
+      /** 音质偏好：balanced=优先流畅 / lossless=优先无损 / highest=站点最高档 */
+      const [qualityMode, setQualityMode] = useState('balanced');
+      /** 卡顿自动降质的次数与提示，用于「已自动降到更低音质」的反馈 */
+      const [autoDowngrade, setAutoDowngrade] = useState('');
+
       const audioRef = useRef(null);
       const rootRef = useRef(null);
+      /** 最近一次成功播放的音质标识，用于判断还能不能降档 */
+      const lastQualityRef = useRef('');
+      /** 卡顿自愈：本曲已自动降档次数，避免反复重取链 */
+      const stallFixRef = useRef(0);
 
       const authed = Boolean(status?.authenticated);
       const hasTrack = Boolean(current);
@@ -357,27 +391,51 @@
 
       /**
        * 播放某首：先向后端换取转发地址，再交给 audio。
-       * 搜索结果不带音质信息，后端会自己走 parse → resolve 并挑最高可用音质，
-       * 所以这里只把歌曲（含页面链接）原样交给后端即可。
+       * 搜索结果不带音质信息，后端会自己走 parse → resolve 挑档，
+       * 所以这里只把歌曲（含页面链接）和「要不要降档」交给后端。
+       *
+       * keepTime：卡顿自愈时从当前进度续播，避免从头开始。
        */
       const playAt = useCallback(
-        async (list, position) => {
+        async (list, position, opts = {}) => {
           const track = list[position];
           if (!track) return;
+          const resumeAt = Number(opts.keepTime) || 0;
           setError('');
           setResolving(true);
           setCurrent(track);
           setIndex(position);
-          setTime(0);
-          setDuration(0);
+          if (!resumeAt) {
+            setTime(0);
+            setDuration(0);
+          }
           try {
-            const r = await api({ type: 'resolve', track });
+            // forceLowQuality：卡顿自动降级时，明确要求后端给低码率档
+            const r = await api({
+              type: 'resolve',
+              track,
+              quality: opts.quality || '',
+              lowQuality: Boolean(opts.forceLowQuality),
+            });
             const src = r?.src || '';
             if (!src) throw new Error('没有可用的播放地址');
             const el = audioRef.current;
             if (!el) return;
             el.src = src;
             el.volume = volume;
+            if (resumeAt > 0.5) {
+              // 等元数据就绪再跳转，否则 currentTime 会被忽略
+              const seek = () => {
+                try {
+                  el.currentTime = resumeAt;
+                } catch {
+                  /* 忽略：无法跳转就从当前位置播 */
+                }
+                el.removeEventListener('loadedmetadata', seek);
+              };
+              el.addEventListener('loadedmetadata', seek);
+            }
+            lastQualityRef.current = r?.quality || '';
             await el.play();
           } catch (e) {
             setError(e.message || '播放失败');
@@ -391,6 +449,52 @@
         },
         [volume],
       );
+
+      /**
+       * 卡顿自愈：上游对单连接限速，无损档常供不上，表现为「卡一下又恢复」。
+       * 监听 waiting（缓冲耗尽），持续超过阈值且当前是无损档，就自动降一档并从原进度续播。
+       * 只在本曲内自愈一次，不改用户选择的音质偏好。
+       */
+      useEffect(() => {
+        const el = audioRef.current;
+        if (!el) return;
+        let timer = null;
+
+        const clear = () => {
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
+        };
+
+        const onWaiting = () => {
+          clear();
+          timer = setTimeout(() => {
+            // 只有「正在播放却断流」才自愈；用户暂停不算
+            if (el.paused || !current) return;
+            if (stallFixRef.current >= 1) return;
+            // 已经是低码率档就别再降了，避免降无可降时反复重取
+            if (!/flac|lossless|hires/i.test(lastQualityRef.current)) return;
+            const at = el.currentTime || 0;
+            stallFixRef.current += 1;
+            setAutoDowngrade('网络供不上无损，已自动降到更低音质');
+            const i = queue.indexOf(current);
+            playAt(queue, i >= 0 ? i : index, { forceLowQuality: true, keepTime: at });
+          }, STALL_TIMEOUT_MS);
+        };
+
+        const onPlaying = () => clear();
+
+        el.addEventListener('waiting', onWaiting);
+        el.addEventListener('playing', onPlaying);
+        el.addEventListener('canplay', onPlaying);
+        return () => {
+          clear();
+          el.removeEventListener('waiting', onWaiting);
+          el.removeEventListener('playing', onPlaying);
+          el.removeEventListener('canplay', onPlaying);
+        };
+      }, [current, queue, index, playAt]);
 
       /** 播完自动下一首；用 ref 保存最新实现，避免事件回调拿到旧闭包 */
       const nextRef = useRef(() => {});
@@ -431,6 +535,25 @@
         if (el.paused) el.play().catch(() => setPlaying(false));
         else el.pause();
       }, [current]);
+
+      /**
+       * 切换音质档位：循环 balanced → lossless → highest。
+       * 切换后立即用新档位重取当前曲目，从原进度继续，方便直接听出差别。
+       */
+      const cycleQuality = useCallback(() => {
+        const next = QUALITY_MODES_LIST[(QUALITY_MODES_LIST.indexOf(qualityMode) + 1) % QUALITY_MODES_LIST.length];
+        setQualityMode(next);
+        setError('');
+        api({ type: 'quality', mode: next }).catch(() => {});
+        const el = audioRef.current;
+        const at = el ? el.currentTime || 0 : 0;
+        if (current && queue.length) {
+          // 换档意味着重新取链，允许再自愈一次
+          stallFixRef.current = 0;
+          const i = queue.indexOf(current);
+          playAt(queue, i >= 0 ? i : index, { keepTime: at });
+        }
+      }, [qualityMode, current, queue, index, playAt]);
 
       /** 拉发现广场数据；切分类时重新拉。 */
       const loadDiscover = useCallback(async (category) => {
@@ -1044,10 +1167,21 @@
               h('span', { className: 'mp-time' }, formatTime(duration)),
               h(
                 'button',
+                {
+                  className: 'mp-icon-btn mp-quality-btn',
+                  title: `音质：${QUALITY_LABELS[qualityMode] || qualityMode}（点击切换）`,
+                  onClick: cycleQuality,
+                  disabled: resolving,
+                },
+                h('span', { className: 'mp-quality-text' }, QUALITY_SHORT[qualityMode] || '—'),
+              ),
+              h(
+                'button',
                 { className: 'mp-icon-btn', title: volume > 0 ? '静音' : '取消静音', onClick: () => setVolume(volume > 0 ? 0 : 1) },
                 h(Icon, { name: 'volume', size: 15 }),
               ),
             ),
+            autoDowngrade ? h('div', { className: 'mp-note' }, autoDowngrade) : null,
           )
         : null;
 
@@ -1126,7 +1260,7 @@
           playing ? h('span', { className: 'mp-badge' }) : null,
         ),
         panel,
-        h('audio', { ref: audioRef, className: 'mp-audio', preload: 'none' }),
+        h('audio', { ref: audioRef, className: 'mp-audio', preload: 'auto' }),
       );
     }
 
