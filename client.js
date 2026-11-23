@@ -155,6 +155,12 @@
   background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.18));
   color: var(--dsw-alias-label-primary, #111); font-weight: 600;
 }
+/* 切分类时的轻量加载提示：旧数据继续显示，避免闪白 */
+.mp-loading-bar {
+  margin: 4px 10px 0; padding: 4px 8px; border-radius: 6px; font-size: 11px;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.12));
+}
 .mp-sec-title {
   font-size: 11px; font-weight: 600; padding: 8px 10px 4px;
   color: var(--dsw-alias-label-secondary, #6b7280);
@@ -562,7 +568,10 @@
         try {
           const data = await api({ type: 'discover', category: category || '' });
           setDisc(data);
-          setDiscCategory(data?.category || category || '全部');
+          // 选中态用「用户点的那个分类」，不要跟着后端回显跑。
+          // 原因：站点对不认识的分类会静默回退成「全部」，
+          // 若用回显值，按钮就会突然跳回「全部」，看起来像没点动。
+          setDiscCategory(category || '全部');
         } catch (e) {
           setDiscError(e.message || '加载失败');
         } finally {
@@ -946,7 +955,9 @@
                 className: 'mp-cat',
                 'data-active': discCategory === c,
                 onClick: () => {
-                  if (discCategory === c || discLoading) return;
+                  // 只挡「重复点同一个分类」；换分类应当允许，否则加载中连点第二下没反应，
+                  // 用户会以为筛选卡住了。
+                  if (discCategory === c) return;
                   loadDiscover(c);
                 },
               },
@@ -960,12 +971,21 @@
             ? h(
                 React.Fragment,
                 null,
-                // 榜单卡片
+                // 切换分类时的加载条：不遮挡旧数据，但要让用户知道点击已被接收
+                discLoading ? h('div', { className: 'mp-loading-bar' }, '加载中…') : null,
+                // 榜单卡片。
+                // 注意：站点的排行榜是「全站榜」，不随分类变化（各分类返回同一批），
+                // 只有下方歌单会变。所以这里明确标注，避免用户以为筛选没生效。
                 disc.charts?.length
                   ? h(
                       React.Fragment,
                       null,
-                      h('div', { className: 'mp-sec-title' }, '排行榜', h('span', null, `${disc.charts.length} 个`)),
+                      h(
+                        'div',
+                        { className: 'mp-sec-title' },
+                        '排行榜',
+                        h('span', null, `全站 ${disc.charts.length} 个`),
+                      ),
                       h(
                         'div',
                         { className: 'mp-charts' },
@@ -992,12 +1012,18 @@
                       ),
                     )
                   : null,
-                // 推荐歌单
+                // 推荐歌单。歌单才是真正随分类变化的部分，标题里带上分类名，
+                // 让「点了分类之后哪里变了」一眼可见。
                 disc.playlists?.length
                   ? h(
                       React.Fragment,
                       null,
-                      h('div', { className: 'mp-sec-title' }, '推荐歌单', h('span', null, `${disc.playlists.length} 个`)),
+                      h(
+                        'div',
+                        { className: 'mp-sec-title' },
+                        discCategory && discCategory !== '全部' ? `${discCategory} · 推荐歌单` : '推荐歌单',
+                        h('span', null, `${disc.playlists.length} 个`),
+                      ),
                       h(
                         'div',
                         { className: 'mp-pls' },
