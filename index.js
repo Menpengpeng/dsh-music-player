@@ -266,6 +266,31 @@ export function apply(ctx) {
       }
       return { mode: qualityMode, modes: Object.keys(QUALITY_MODES) };
     },
+    /** 「我喜欢」列表：与站点网页端共用同一份数据。 */
+    async favorites() {
+      await site.ensureReady();
+      const data = await site.favorites();
+      return {
+        items: data.items.map((t) => ({
+          trackKey: String(t?.track_key || ''),
+          title: String(t?.title || ''),
+          artist: String(t?.artist || ''),
+          album: String(t?.album || ''),
+          platform: String(t?.platform || ''),
+          songId: String(t?.song_id || ''),
+          url: String(t?.url || ''),
+          cover: String(t?.cover || ''),
+          duration: Number(t?.duration || 0) || 0,
+        })),
+        keys: data.keys,
+      };
+    },
+    /** 切换收藏。站点按 track_key 自行判断加入还是移除。 */
+    async favorite(body) {
+      await site.ensureReady();
+      const result = await site.toggleFavorite(body.track || {});
+      return { liked: result.liked, trackKey: result.track_key, count: result.count };
+    },
   };
 
   const web = ctx.get('webServer');

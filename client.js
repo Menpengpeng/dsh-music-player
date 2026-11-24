@@ -161,6 +161,31 @@
   color: var(--dsw-alias-label-secondary, #6b7280);
   background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.12));
 }
+/* 收藏心形：默认是空心，已收藏变实心并染红，一眼能看出状态 */
+.mp-fav-btn {
+  flex: none; width: 22px; height: 22px; line-height: 22px; text-align: center;
+  border-radius: 50%; cursor: pointer; font-size: 14px; user-select: none;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  transition: background .12s ease, color .12s ease, transform .12s ease;
+}
+.mp-fav-btn:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.16));
+  transform: scale(1.08);
+}
+.mp-fav-btn[data-on="true"] { color: var(--dsw-alias-label-error, #e0245e); }
+.mp-fav-btn:focus-visible {
+  outline: 2px solid var(--dsw-alias-border-strong, rgba(127,127,127,.55));
+  outline-offset: 1px;
+}
+/* 播放条上的心形稍大一点，和两侧按钮对齐 */
+.mp-fav-now { width: 24px; height: 24px; line-height: 24px; font-size: 15px; margin-right: 2px; }
+/* 「我喜欢」面板顶部：数量 + 全部播放 */
+.mp-fav-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 2px 10px 6px; font-size: 11px;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+}
+.mp-fav-playall { height: 24px; padding: 0 10px; border-radius: 12px; font-size: 11px; }
 .mp-sec-title {
   font-size: 11px; font-weight: 600; padding: 8px 10px 4px;
   color: var(--dsw-alias-label-secondary, #6b7280);
@@ -301,6 +326,18 @@
       const [qualityMode, setQualityMode] = useState('balanced');
       /** 卡顿自动降质的次数与提示，用于「已自动降到更低音质」的反馈 */
       const [autoDowngrade, setAutoDowngrade] = useState('');
+
+      /**
+       * 「我喜欢」：与站点网页端共用同一份数据，所以在插件里收藏，
+       * 打开 dl.74520.xyz 也能看到；反之亦然。
+       * favKeys 用 Set 做 O(1) 判断，favItems 才是列表数据。
+       */
+      const [favItems, setFavItems] = useState([]);
+      const [favKeys, setFavKeys] = useState(() => new Set());
+      const [favLoading, setFavLoading] = useState(false);
+      const [favError, setFavError] = useState('');
+      /** 正在请求中的 track_key，避免连点导致重复提交 */
+      const favBusyRef = useRef(new Set());
 
       const audioRef = useRef(null);
       const rootRef = useRef(null);
@@ -561,6 +598,86 @@
         }
       }, [qualityMode, current, queue, index, playAt]);
 
+      /** 拉「我喜欢」列表。与站点共用，刷新页面后仍在。 */
+      const loadFavorites = useCallback(async () => {
+        setFavLoading(true);
+        setFavError('');
+        try {
+          const data = await api({ type: 'favorites' });
+          const items = Array.isArray(data?.items) ? data.items : [];
+          setFavItems(items);
+          setFavKeys(new Set(Array.isArray(data?.keys) ? data.keys : items.map((t) => t.trackKey)));
+        } catch (e) {
+          setFavError(e.message || '加载失败');
+        } finally {
+          setFavLoading(false);
+        }
+      }, []);
+
+      /**
+       * 切换收藏。以服务端返回的 liked 为准更新本地状态，
+       * 不做「先翻转再回滚」的乐观更新——收藏是低频操作，
+       * 少一次状态抖动比快 200ms 更值得。
+       */
+      const toggleFavorite = useCallback(
+        async (track) => {
+          if (!track) return;
+          const key =
+            track.track_key ||
+            track.trackKey ||
+            (track.platform && (track.song_id || track.id) ? `${track.platform}:${track.song_id || track.id}` : track.url || '');
+          if (!key) return;
+          // 同一首还在请求中，忽略连点
+          if (favBusyRef.current.has(key)) return;
+          favBusyRef.current.add(key);
+          try {
+            const r = await api({ type: 'favorite', track });
+            setFavKeys((prev) => {
+              const next = new Set(prev);
+              if (r?.liked) next.add(r.trackKey || key);
+              else next.delete(r.trackKey || key);
+              return next;
+            });
+            // 列表同步：加入就插到最前，移除就过滤掉，避免整表重拉
+            if (r?.liked) {
+              const normalized = {
+                trackKey: r.trackKey || key,
+                title: track.title || '未命名歌曲',
+                artist: track.artist || '',
+                album: track.album || '',
+                platform: track.platform || '',
+                songId: track.song_id || track.id || '',
+                url: track.url || '',
+                cover: track.cover || '',
+                duration: track.duration || 0,
+              };
+              setFavItems((prev) => [normalized, ...prev.filter((x) => x.trackKey !== normalized.trackKey)]);
+            } else {
+              setFavItems((prev) => prev.filter((x) => x.trackKey !== (r.trackKey || key)));
+            }
+            setError('');
+          } catch (e) {
+            setError(e.message || '收藏失败');
+          } finally {
+            favBusyRef.current.delete(key);
+          }
+        },
+        [],
+      );
+
+      /** 某首歌是否已收藏。current 与列表项都可能用到。 */
+      const isFavorite = useCallback(
+        (track) => {
+          if (!track) return false;
+          if (track.track_key && favKeys.has(track.track_key)) return true;
+          if (track.trackKey && favKeys.has(track.trackKey)) return true;
+          const sid = track.song_id || track.id;
+          if (track.platform && sid && favKeys.has(`${track.platform}:${sid}`)) return true;
+          return false;
+        },
+        [favKeys],
+      );
+
       /** 拉发现广场数据；切分类时重新拉。 */
       const loadDiscover = useCallback(async (category) => {
         setDiscLoading(true);
@@ -586,12 +703,26 @@
         loadDiscover('');
       }, [tab, authed, disc, discLoading, loadDiscover]);
 
+      /**
+       * 切到「喜欢」时拉一次列表。
+       * 每次都拉、不做缓存：站点网页端可能刚收藏过，
+       * 收藏列表通常很小（几十条），重拉比维护缓存一致性更省心。
+       */
+      useEffect(() => {
+        if (tab !== 'fav' || !authed) return;
+        if (favLoading) return;
+        loadFavorites();
+      }, [tab, authed, favLoading, loadFavorites]);
+
       // 已登出就不再展示旧数据，防止换账号后看到上一个账号的内容
       useEffect(() => {
         if (authed) return;
         setDisc(null);
         setOpenedPlaylist(null);
         setDiscCategory('全部');
+        setFavItems([]);
+        setFavKeys(new Set());
+        setFavError('');
       }, [authed]);
 
       /** 打开歌单，拿到曲目后直接可以播放。 */
@@ -759,6 +890,37 @@
         ? status?.user?.nickname || status?.user?.account || '已登录'
         : '音乐站 · 未登录';
 
+      /**
+       * 曲目行右侧的心形收藏按钮。
+       * 用 span + role=button 而不是 button：曲目行本身可点击播放，
+       * 嵌套 button 在部分渲染器里会触发点击冒泡问题，这里显式 stopPropagation。
+       * 定义必须放在所有使用它的面板之前（searchPane 就用到了）。
+       */
+      const favButton = (track, extraClass) =>
+        h(
+          'span',
+          {
+            className: 'mp-fav-btn' + (extraClass ? ' ' + extraClass : ''),
+            role: 'button',
+            tabIndex: 0,
+            'data-on': isFavorite(track),
+            title: isFavorite(track) ? '取消喜欢' : '喜欢（收藏到「我喜欢的音乐」）',
+            'aria-label': isFavorite(track) ? '取消喜欢' : '喜欢',
+            onClick: (e) => {
+              e.stopPropagation();
+              toggleFavorite(track);
+            },
+            onKeyDown: (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.stopPropagation();
+                toggleFavorite(track);
+              }
+            },
+          },
+          isFavorite(track) ? '♥' : '♡',
+        );
+
       const searchPane = h(
         React.Fragment,
         null,
@@ -824,6 +986,7 @@
                         [item.artist, item.album].filter(Boolean).join(' · ') || '未知歌手',
                       ),
                     ),
+                    favButton(item),
                     item.duration ? h('span', { className: 'mp-time' }, formatTime(item.duration)) : null,
                   ),
                 ),
@@ -896,6 +1059,7 @@
                   [item.artist, item.album].filter(Boolean).join(' · ') || '未知歌手',
                 ),
               ),
+              favButton(item),
               item.duration ? h('span', { className: 'mp-time' }, formatTime(item.duration)) : null,
             ),
           ),
@@ -908,6 +1072,81 @@
         if (v >= 10000) return (v / 10000).toFixed(1) + '万';
         return String(v);
       };
+
+      /**
+       * 收藏项用的是后端归一化后的字段名（trackKey/songId），
+       * 而播放链路和其他列表都吃站点原始字段（track_key/song_id）。
+       * 直接播放会取不到 songId，所以这里转一次。
+       */
+      const favToTrack = (item) => ({
+        track_key: item.trackKey,
+        title: item.title,
+        artist: item.artist,
+        album: item.album,
+        platform: item.platform,
+        song_id: item.songId,
+        id: item.songId,
+        url: item.url,
+        cover: item.cover,
+        duration: item.duration,
+      });
+      const favTracks = favItems.map(favToTrack);
+
+      /** 「我喜欢」面板：与站点网页端同一份数据，这里改动会同步过去。 */
+      const favPane = h(
+        'div',
+        { className: 'mp-body', style: { paddingTop: 6 } },
+        error ? h('div', { className: 'mp-error' }, error) : null,
+        favLoading && !favItems.length
+          ? h('div', { className: 'mp-hint' }, '加载中…')
+          : favTracks.length
+            ? h(
+                React.Fragment,
+                null,
+                h(
+                  'div',
+                  { className: 'mp-fav-head' },
+                  h('span', null, `共 ${favTracks.length} 首`),
+                  h(
+                    'button',
+                    {
+                      className: 'mp-btn mp-fav-playall',
+                      onClick: () => playList(favTracks, 0),
+                      title: '从第一首开始播放',
+                    },
+                    '全部播放',
+                  ),
+                ),
+                h(
+                  'ul',
+                  { className: 'mp-list' },
+                  favTracks.map((item, i) =>
+                    h(
+                      'li',
+                      {
+                        key: item.track_key || `fav-${i}`,
+                        className: 'mp-row',
+                        'data-current': Boolean(current && current.track_key === item.track_key),
+                        onClick: () => playList(favTracks, i),
+                        title: `${item.title}${item.artist ? ' - ' + item.artist : ''}`,
+                      },
+                      h(
+                        'div',
+                        { className: 'mp-meta' },
+                        h('div', { className: 'mp-row-title' }, item.title),
+                        h('div', { className: 'mp-row-sub' }, item.artist || '未知歌手'),
+                      ),
+                      favButton(item),
+                    ),
+                  ),
+                ),
+              )
+            : h(
+                'div',
+                { className: 'mp-hint' },
+                '还没有喜欢的歌，点歌曲右侧的 ♡ 就能收藏到这里',
+              ),
+      );
 
       // 已打开歌单/榜单：显示曲目，带返回按钮
       const openedPane = h(
@@ -1166,6 +1405,7 @@
                 h('div', { className: 'mp-row-title', title: current.title }, current.title),
                 h('div', { className: 'mp-row-sub' }, current.artist || '未知歌手'),
               ),
+              favButton(current, 'mp-fav-now'),
               h(
                 'div',
                 { className: 'mp-controls' },
@@ -1251,11 +1491,22 @@
                       ),
                       h(
                         'button',
+                        { className: 'mp-tab', 'data-active': tab === 'fav', onClick: () => setTab('fav') },
+                        favItems.length ? `喜欢 · ${favItems.length}` : '喜欢',
+                      ),
+                      h(
+                        'button',
                         { className: 'mp-tab', 'data-active': tab === 'queue', onClick: () => setTab('queue') },
                         queue.length ? `队列 · ${queue.length}` : '队列',
                       ),
                     ),
-                    tab === 'search' ? searchPane : tab === 'discover' ? (openedPlaylist ? openedPane : discoverPane) : queuePane,
+                    tab === 'search'
+                      ? searchPane
+                      : tab === 'discover'
+                        ? (openedPlaylist ? openedPane : discoverPane)
+                        : tab === 'fav'
+                          ? favPane
+                          : queuePane,
                   )
                 : loginPane,
               nowBar,
