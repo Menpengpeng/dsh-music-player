@@ -5,7 +5,7 @@
 //  2. x-client-token 与登录 Cookie 属于敏感凭据，只应存在 Host 侧磁盘；
 //  3. 音频直链通常校验 Referer，由 Host 转发才能稳定播放并支持拖动进度。
 
-import { MusicSite } from './lib/site.js';
+import { MusicSite, songIdFromUrl } from './lib/site.js';
 import { BrowserLogin, browserLoginInfo } from './lib/browser-login.js';
 
 export const name = 'music-player';
@@ -426,17 +426,26 @@ export function apply(ctx) {
 /** 把站点返回的搜索/榜单结果统一成前端好用的结构。 */
 export function normalizeItems(data) {
   const list = Array.isArray(data?.items) ? data.items : Array.isArray(data) ? data : [];
-  return list.map((item) => ({
-    track_key: item.track_key || `${item.platform || 'music'}:${item.song_id || item.id || ''}`,
-    song_id: String(item.song_id || item.id || ''),
-    platform: String(item.platform || ''),
-    title: String(item.title || '未命名歌曲'),
-    artist: String(item.artist || item.author || ''),
-    album: String(item.album || ''),
-    cover: String(item.cover || ''),
-    duration: Number(item.duration || 0),
-    /** 各音质条目的原始信息，取链时要用 */
-    audio_qualities: Array.isArray(item.audio_qualities) ? item.audio_qualities : [],
-    url: String(item.url || ''),
-  }));
+  return list.map((item) => {
+    const url = String(item.url || '');
+    // 歌单曲目没有 song_id，从链接里补一个，否则收藏时算出 `qqmusic:` 这种空键
+    const songId = String(item.song_id || item.id || songIdFromUrl(url) || '');
+    const platform = String(item.platform || '');
+    // 只有真正拿到 ID 才拼 `平台:ID`；拿不到就留空，让上层退回用 url 当键
+    const derived = platform && songId ? `${platform}:${songId}` : '';
+    return {
+      track_key: String(item.track_key || derived || ''),
+      song_id: songId,
+      platform,
+      title: String(item.title || '未命名歌曲'),
+      artist: String(item.artist || item.author || ''),
+      album: String(item.album || ''),
+      cover: String(item.cover || ''),
+      duration: Number(item.duration || 0),
+      /** 各音质条目的原始信息，取链时要用 */
+      audio_qualities: Array.isArray(item.audio_qualities) ? item.audio_qualities : [],
+      url,
+    };
+  });
 }
+

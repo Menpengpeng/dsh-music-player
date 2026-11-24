@@ -615,6 +615,30 @@
       }, []);
 
       /**
+       * 从歌曲页链接里解析歌曲 ID。
+       * 歌单曲目站点只给链接、不给 song_id，前端算 key 时也要能从链接里补出来，
+       * 否则「已收藏」的高亮会和后端算出的键对不上。
+       */
+      const songIdFromUrl = (url) => {
+        const text = String(url || '').trim();
+        if (!text) return '';
+        const qq = text.match(/songDetail\/([0-9A-Za-z]+)/);
+        if (qq) return qq[1];
+        const ne = text.match(/[?&]id=([0-9A-Za-z]+)/);
+        if (ne) return ne[1];
+        return '';
+      };
+      /** 曲目的唯一键，规则与后端一致：平台:歌曲ID，取不到 ID 才退回链接 */
+      const trackKeyOf = (track) => {
+        if (!track) return '';
+        if (track.track_key) return String(track.track_key);
+        if (track.trackKey) return String(track.trackKey);
+        const sid = track.song_id || track.id || songIdFromUrl(track.url);
+        if (track.platform && sid) return `${track.platform}:${sid}`;
+        return String(track.url || '');
+      };
+
+      /**
        * 切换收藏。以服务端返回的 liked 为准更新本地状态，
        * 不做「先翻转再回滚」的乐观更新——收藏是低频操作，
        * 少一次状态抖动比快 200ms 更值得。
@@ -622,10 +646,7 @@
       const toggleFavorite = useCallback(
         async (track) => {
           if (!track) return;
-          const key =
-            track.track_key ||
-            track.trackKey ||
-            (track.platform && (track.song_id || track.id) ? `${track.platform}:${track.song_id || track.id}` : track.url || '');
+          const key = trackKeyOf(track);
           if (!key) return;
           // 同一首还在请求中，忽略连点
           if (favBusyRef.current.has(key)) return;
@@ -669,11 +690,8 @@
       const isFavorite = useCallback(
         (track) => {
           if (!track) return false;
-          if (track.track_key && favKeys.has(track.track_key)) return true;
-          if (track.trackKey && favKeys.has(track.trackKey)) return true;
-          const sid = track.song_id || track.id;
-          if (track.platform && sid && favKeys.has(`${track.platform}:${sid}`)) return true;
-          return false;
+          const key = trackKeyOf(track);
+          return key ? favKeys.has(key) : false;
         },
         [favKeys],
       );
