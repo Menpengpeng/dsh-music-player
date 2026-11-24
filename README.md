@@ -18,6 +18,14 @@
 </p>
 
 <p align="center">
+  <a href="screenshots/05-favorites.png"><img src="screenshots/05-favorites.png" width="620" alt="我喜欢"></a>
+</p>
+
+<p align="center">
+  <sub>「我喜欢」：曲目行与播放条上的心形一键收藏，与站点网页端共用同一份数据</sub>
+</p>
+
+<p align="center">
   <img src="screenshots/04-login.png" width="620" alt="登录引导">
 </p>
 
